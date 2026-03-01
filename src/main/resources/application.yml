@@ -1,0 +1,40 @@
+spring:
+  application:
+    name: short-drama-agent
+
+  # 加载项目 .env（已被 .gitignore 排除）作为属性源；缺失时静默跳过
+  config:
+    import: optional:file:.env[.properties]
+
+  # 外部 PostgreSQL 需显式开启 SQL 初始化（schema.sql / data.sql 幂等）
+  sql:
+    init:
+      mode: always
+
+  # PostgreSQL：mock 订单数据 + pgvector 向量库；连接参数从 .env 读取（.env 不进 git）
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://127.0.0.1:5432/shortdrama}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:}
+
+  # DeepSeek 接入：OpenAI 兼容层（Spring AI 无 DeepSeek 官方 starter）
+  ai:
+    openai:
+      # base-url 指向 DeepSeek 官方 API；api-key 只从环境变量读取，绝不明文入库
+      base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+      api-key: ${DEEPSEEK_API_KEY:}
+      chat:
+        options:
+          # deepseek-chat 为通用对话模型（生产环境映射为 deepseek-v4-flash）
+          model: ${DEEPSEEK_MODEL:deepseek-chat}
+          temperature: 0.7
+          max-tokens: 1024
+
+server:
+  port: 8080
+
+logging:
+  level:
+    com.shortdrama.agent: DEBUG
+  file:
+    name: logs/app.log
