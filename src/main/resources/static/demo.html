@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>短剧订阅智能客服 Agent — Demo</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: "Microsoft YaHei", -apple-system, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh; display: flex; align-items: center; justify-content: center;
+        }
+        .chatbox {
+            width: 720px; max-width: 95vw; height: 86vh;
+            background: #fff; border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,.3);
+            display: flex; flex-direction: column; overflow: hidden;
+        }
+        header {
+            padding: 18px 24px; background: #4a3f8f; color: #fff;
+            display: flex; align-items: center; justify-content: space-between;
+        }
+        header h1 { font-size: 18px; font-weight: 600; }
+        header .sub { font-size: 12px; opacity: .8; margin-top: 4px; }
+        #cost { font-size: 12px; background: rgba(255,255,255,.15); padding: 6px 12px; border-radius: 20px; }
+        #messages { flex: 1; overflow-y: auto; padding: 20px; }
+        .msg { margin-bottom: 14px; display: flex; }
+        .msg .bubble { max-width: 78%; padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+        .msg.user { justify-content: flex-end; }
+        .msg.user .bubble { background: #667eea; color: #fff; border-bottom-right-radius: 4px; }
+        .msg.assistant .bubble { background: #f1f3f8; color: #333; border-bottom-left-radius: 4px; }
+        .cursor { display: inline-block; width: 8px; height: 16px; background: #667eea; margin-left: 2px; vertical-align: -2px; animation: blink .8s infinite; }
+        @keyframes blink { 50% { opacity: 0; } }
+        footer { padding: 14px 20px; border-top: 1px solid #eee; display: flex; gap: 10px; }
+        #input {
+            flex: 1; padding: 10px 14px; border: 1px solid #ddd; border-radius: 10px;
+            font-size: 14px; outline: none; transition: border .2s;
+        }
+        #input:focus { border-color: #667eea; }
+        #send {
+            padding: 10px 22px; background: #667eea; color: #fff; border: none;
+            border-radius: 10px; font-size: 14px; cursor: pointer; transition: opacity .2s;
+        }
+        #send:hover { opacity: .85; }
+        #send:disabled { opacity: .5; cursor: not-allowed; }
+        .hint { padding: 4px 20px 14px; font-size: 12px; color: #999; }
+    </style>
+</head>
+<body>
+<div class="chatbox">
+    <header>
+        <div>
+            <h1>🎬 短剧订阅智能客服 Agent</h1>
+            <div class="sub">意图识别 · 函数调用 · RAG 策略问答 · 会话记忆 · SSE 流式</div>
+        </div>
+        <div id="cost">$0.000000</div>
+    </header>
+    <div id="messages"></div>
+    <div class="hint">试试：「我想退款」「取消订阅 SUB-20260601-A1」「重生之都市修仙从第几集开始收费？」</div>
+    <footer>
+        <input id="input" placeholder="输入你的问题..." autocomplete="off">
+        <button id="send">发送</button>
+    </footer>
+</div>
+
+<script>
+    const sessionId = 'demo-' + Date.now();
+    const msgBox = document.getElementById('messages');
+    const input = document.getElementById('input');
+    const sendBtn = document.getElementById('send');
+    const costEl = document.getElementById('cost');
+
+    function appendMsg(role, text) {
+        const div = document.createElement('div');
+        div.className = 'msg ' + role;
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        bubble.textContent = text;
+        div.appendChild(bubble);
+        msgBox.appendChild(div);
+        msgBox.scrollTop = msgBox.scrollHeight;
+        return bubble;
+    }
+
+    function updateCost() {
+        fetch('/api/cost').then(r => r.json()).then(d => {
+            if (d.data) {
+                const c = d.data;
+                costEl.textContent = `$${c.costUsd} · ${c.calls} 次调用 · ${c.totalTokens} tokens`;
+            }
+        }).catch(() => {});
+    }
+
+    async function send() {
+        const text = input.value.trim();
+        if (!text || sendBtn.disabled) return;
+        input.value = '';
+        appendMsg('user', text);
+        sendBtn.disabled = true;
+
+        // 流式占位气泡 + 光标
+        const bubble = appendMsg('assistant', '');
+        const cursor = document.createElement('span');
+        cursor.className = 'cursor';
+        bubble.appendChild(cursor);
+        let full = '';
+
+        try {
+            const resp = await fetch('/api/chat/stream', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: text, sessionId })
+            });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                // SSE 解析：按 \n\n 分事件，取 data: 行
+                const events = buffer.split('\n\n');
+                buffer = events.pop();
+                for (const ev of events) {
+                    const dataLine = ev.split('\n').find(l => l.startsWith('data:'));
+                    if (dataLine) {
+                        full += dataLine.slice(5);
+                        bubble.textContent = full;
+                        msgBox.scrollTop = msgBox.scrollHeight;
+                    }
+                }
+            }
+        } catch (e) {
+            bubble.textContent = '（网络错误：' + e.message + '）';
+        } finally {
+            bubble.removeChild(cursor);
+            sendBtn.disabled = false;
+            updateCost();
+        }
+    }
+
+    sendBtn.onclick = send;
+    input.onkeydown = e => { if (e.key === 'Enter') send(); };
+    updateCost();
+    setInterval(updateCost, 5000);
+</script>
+</body>
+</html>
