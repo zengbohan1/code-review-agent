@@ -73,13 +73,13 @@ if ($LASTEXITCODE -ne 0) {
 $psql = Join-Path $bin 'psql.exe'
 $env:PGPASSWORD = $dbPassword
 Write-Host "[5/5] 创建数据库 shortdrama 并启用 vector 扩展 ..."
-$exists = & $psql -h 127.0.0.1 -p $port -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='shortdrama'" 2>&1
+$exists = & $psql -w -h 127.0.0.1 -p $port -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='shortdrama'" 2>&1
 if ($LASTEXITCODE -ne 0) { throw "psql 连接失败: $exists" }
 if ("$exists".Trim() -ne '1') {
-    & $psql -h 127.0.0.1 -p $port -U postgres -c "CREATE DATABASE shortdrama ENCODING 'UTF8'" | Out-Host
+    & $psql -w -h 127.0.0.1 -p $port -U postgres -c "CREATE DATABASE shortdrama ENCODING 'UTF8'" | Out-Host
     if ($LASTEXITCODE -ne 0) { throw 'CREATE DATABASE 失败' }
 }
-& $psql -h 127.0.0.1 -p $port -U postgres -d shortdrama -c "CREATE EXTENSION IF NOT EXISTS vector" | Out-Host
+& $psql -w -h 127.0.0.1 -p $port -U postgres -d shortdrama -c "CREATE EXTENSION IF NOT EXISTS vector" | Out-Host
 if ($LASTEXITCODE -ne 0) { throw 'CREATE EXTENSION vector 失败' }
 
 # ---------- 6. 写入 .env ----------
