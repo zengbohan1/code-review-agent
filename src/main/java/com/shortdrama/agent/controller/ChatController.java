@@ -30,9 +30,10 @@ import java.util.concurrent.Executors;
  * <p>两个端点：
  * <ul>
  *   <li>POST /api/chat —— 非流式（兜底 / 联调）</li>
- *   <li>POST /api/chat/stream —— SSE 流式（demo 页实时渲染）</li>
+ *   <li>POST /api/chat/stream —— SSE 流式（首事件推送意图，随后逐 token 推送回答）</li>
  * </ul>
- * 生产化三件套：SSE 流式输出、LLM 失败重试 + 规则兜底转人工、Token 成本统计（CostAdvisor）。
+ * 流式与非流式共用一次意图识别（避免重复调用 LLM 导致行为不一致）；
+ * LLM 调用带重试，失败/超时统一降级为规则兜底 + 转人工，系统不瘫。
  */
 @RestController
 @RequestMapping("/api/chat")
@@ -43,8 +44,8 @@ public class ChatController {
     /** 置信度阈值：低于则先澄清，澄清超限转人工。 */
     private static final double CONFIDENCE_THRESHOLD = 0.6;
 
-    /** 流式推送线程池（每请求一条线程，量级可控；生产可用虚拟线程）。 */
-    private final ExecutorService streamPool = Executors.newCachedThreadPool(r -> {
+    /** 流式推送线程池：固定 8 线程，超出排队（避免无界线程拖垮系统）。 */
+    private final ExecutorService streamPool = Executors.newFixedThreadPool(8, r -> {
         Thread t = new Thread(r, "sse-pusher");
         t.setDaemon(true);
         return t;
@@ -104,38 +105,43 @@ public class ChatController {
     public ChatResponse chat(@RequestBody ChatRequest request) {
         String sessionId = normalizeSession(request.sessionId());
         String message = request.message();
-        return new ChatResponse(handle(sessionId, message), null, sessionId);
+        IntentResult intent = detectIntent(sessionId, message);
+        String reply = intent == null
+                ? escalationService.escalate(sessionId, message, "LLM_FAILURE")
+                : handle(sessionId, intent, message);
+        return new ChatResponse(reply, intent == null ? "ESCALATE" : intent.intent(), sessionId);
     }
 
     /**
-     * Agent 主流程（意图识别 → 澄清/路由 → 回答），供流式与非流式共用。
-     * LLM 调用统一走 retryTemplate：瞬时故障自动重试，重试耗尽转人工兜底，系统不瘫。
+     * 意图识别（带重试）。识别失败返回 null，由调用方降级转人工。
      */
-    private String handle(String sessionId, String message) {
-        // 1. 意图识别（LLM 结构化输出，带重试）
-        IntentResult intent;
+    private IntentResult detectIntent(String sessionId, String message) {
         try {
-            intent = retryTemplate.execute(ctx -> intentService.detect(message));
+            IntentResult intent = retryTemplate.execute(ctx -> intentService.detect(message));
+            log.debug("intent={} confidence={} slots={}", intent.intent(), intent.confidence(), intent.slots());
+            return intent;
         } catch (Exception e) {
             log.warn("intent detect failed after retries, sessionId={}", sessionId, e);
-            return escalationService.escalate(sessionId, message, "LLM_FAILURE");
+            return null;
         }
-        log.debug("intent={} confidence={} slots={}", intent.intent(), intent.confidence(), intent.slots());
+    }
 
-        // 2. 低置信度：多轮澄清，超限转人工
+    /**
+     * 意图路由后的回答（非流式）：低置信度澄清，超限转人工。
+     */
+    private String handle(String sessionId, IntentResult intent, String message) {
         if (intent.confidence() < CONFIDENCE_THRESHOLD) {
-            if (clarifyService.trackRound(sessionId)) {
-                String question = StringUtils.hasText(intent.clarifyQuestion())
-                        ? intent.clarifyQuestion()
-                        : "抱歉，我没太理解您的意思，可以描述得再具体一些吗？";
-                return question;
-            }
-            return escalationService.escalate(sessionId, message, "LOW_CONFIDENCE");
+            return clarifyReply(sessionId, intent, message);
         }
         clarifyService.clear(sessionId);
+        return route(sessionId, intent.intent(), message);
+    }
 
-        // 3. 路由：转人工 / 闲聊 / 业务（工具 + RAG + 记忆 + 成本采集）
-        return switch (intent.intent()) {
+    /**
+     * 按意图路由：转人工 / 闲聊（无工具）/ 业务（工具 + RAG），均带记忆与成本采集。
+     */
+    private String route(String sessionId, String intent, String message) {
+        return switch (intent) {
             case "ESCALATE" -> escalationService.escalate(sessionId, message, "USER_REQUEST");
             case "CHITCHAT" -> chatClient.prompt()
                     .system(CHAT_SYSTEM)
@@ -153,11 +159,23 @@ public class ChatController {
         };
     }
 
+    /** 构建带会话参数的 prompt spec（流式端点用，与 route 同一套 advisors/工具）。 */
+    private ChatClient.ChatClientRequestSpec buildSpec(String sessionId, String intent) {
+        return "CHITCHAT".equals(intent)
+                ? chatClient.prompt().system(CHAT_SYSTEM)
+                        .advisors(a -> a.param("chat_memory_conversation_id", sessionId)
+                                .advisors(memoryAdvisor, costAdvisor))
+                : chatClient.prompt().system(CHAT_SYSTEM)
+                        .advisors(a -> a.param("chat_memory_conversation_id", sessionId)
+                                .advisors(memoryAdvisor, qaAdvisor, costAdvisor))
+                        .tools(orderTools);
+    }
+
     // ---------------- SSE 流式 ----------------
 
     /**
      * SSE 流式端点：意图识别走非流式（需结构化结果），回答部分逐 token 推送。
-     * 前端用 fetch + ReadableStream 消费（POST + SSE 组合）。
+     * 首事件 event:intent 携带识别出的意图；生成阶段失败降级为转人工话术，连接不中断。
      */
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter stream(@RequestBody ChatRequest request) {
@@ -165,38 +183,29 @@ public class ChatController {
         SseEmitter emitter = new SseEmitter(120_000L);
 
         streamPool.execute(() -> {
-            IntentResult intent;
-            try {
-                // 意图识别 + 澄清判断（与 handle 共用逻辑，但需要区分"直接回答"与"澄清/转人工"）
-                intent = retryTemplate.execute(ctx -> intentService.detect(request.message()));
-                if (intent.confidence() < CONFIDENCE_THRESHOLD || "ESCALATE".equals(intent.intent())) {
-                    // 澄清/转人工无流式意义，直接整段推送
-                    emitter.send(SseEmitter.event().data(handle(sessionId, request.message())));
-                    emitter.complete();
-                    return;
-                }
-                clarifyService.clear(sessionId);
-            } catch (Exception e) {
-                log.warn("intent detect failed, sessionId={}", sessionId, e);
-                try {
-                    emitter.send(SseEmitter.event().data(escalationService.escalate(sessionId, request.message(), "LLM_FAILURE")));
-                    emitter.complete();
-                } catch (IOException ex) {
-                    emitter.completeWithError(ex);
-                }
+            IntentResult intent = detectIntent(sessionId, request.message());
+            if (intent == null) {
+                sendAndComplete(emitter, escalationService.escalate(sessionId, request.message(), "LLM_FAILURE"));
                 return;
             }
+            // 澄清/转人工无流式意义，整段推送
+            if (intent.confidence() < CONFIDENCE_THRESHOLD || "ESCALATE".equals(intent.intent())) {
+                String reply = intent.confidence() < CONFIDENCE_THRESHOLD
+                        ? clarifyReply(sessionId, intent, request.message())
+                        : escalationService.escalate(sessionId, request.message(), "USER_REQUEST");
+                sendAndComplete(emitter, reply);
+                return;
+            }
+            clarifyService.clear(sessionId);
 
-            // 流式生成回答，逐 chunk 推送（LLM 流式输出 + SSE 实时渲染）
-            ChatClient.ChatClientRequestSpec spec = "CHITCHAT".equals(intent.intent())
-                    ? chatClient.prompt().system(CHAT_SYSTEM)
-                            .advisors(a -> a.param("chat_memory_conversation_id", sessionId)
-                                    .advisors(memoryAdvisor, costAdvisor))
-                    : chatClient.prompt().system(CHAT_SYSTEM)
-                            .advisors(a -> a.param("chat_memory_conversation_id", sessionId)
-                                    .advisors(memoryAdvisor, qaAdvisor, costAdvisor))
-                            .tools(orderTools);
-            spec.user(request.message()).stream().content().subscribe(
+            try {
+                emitter.send(SseEmitter.event().name("intent").data(intent.intent()));
+            } catch (IOException e) {
+                emitter.completeWithError(e);
+                return;
+            }
+            // 流式生成回答，逐 chunk 推送；失败降级转人工
+            buildSpec(sessionId, intent.intent()).user(request.message()).stream().content().subscribe(
                     chunk -> {
                         try {
                             emitter.send(SseEmitter.event().data(chunk));
@@ -206,11 +215,37 @@ public class ChatController {
                     },
                     err -> {
                         log.warn("stream error, sessionId={}", sessionId, err);
-                        emitter.completeWithError(err);
+                        try {
+                            emitter.send(SseEmitter.event().data(
+                                    escalationService.escalate(sessionId, request.message(), "LLM_FAILURE")));
+                            emitter.complete();
+                        } catch (IOException ex) {
+                            emitter.completeWithError(ex);
+                        }
                     },
                     emitter::complete);
         });
         return emitter;
+    }
+
+    /** 低置信度澄清，超限转人工。 */
+    private String clarifyReply(String sessionId, IntentResult intent, String message) {
+        if (clarifyService.trackRound(sessionId)) {
+            return StringUtils.hasText(intent.clarifyQuestion())
+                    ? intent.clarifyQuestion()
+                    : "抱歉，我没太理解您的意思，可以描述得再具体一些吗？";
+        }
+        return escalationService.escalate(sessionId, message, "LOW_CONFIDENCE");
+    }
+
+    /** 整段发送并结束（澄清/转人工/降级用）。 */
+    private void sendAndComplete(SseEmitter emitter, String text) {
+        try {
+            emitter.send(SseEmitter.event().data(text));
+            emitter.complete();
+        } catch (IOException e) {
+            emitter.completeWithError(e);
+        }
     }
 
     private String normalizeSession(String sessionId) {
