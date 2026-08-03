@@ -6,6 +6,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.async.AsyncRequestTimeoutException;
 
 /**
  * 全局异常处理：业务规则错误（退款超限/双确认缺失等）转成 400 返回，
@@ -20,6 +21,15 @@ public class GlobalExceptionHandler {
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public Result<Void> handleBusiness(IllegalArgumentException e) {
         return Result.fail(e.getMessage());
+    }
+
+    /**
+     * SSE 流式连接超时（客户端断连/长时间无数据）：属正常交互，不打错误日志。
+     */
+    @ExceptionHandler(AsyncRequestTimeoutException.class)
+    @ResponseStatus(HttpStatus.REQUEST_TIMEOUT)
+    public void handleAsyncTimeout(AsyncRequestTimeoutException e) {
+        log.debug("sse request timeout: {}", e.getMessage());
     }
 
     @ExceptionHandler(Exception.class)

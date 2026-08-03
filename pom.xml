@@ -59,6 +59,12 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!-- WebClient 底层连接器：OpenAiApi 手动装配需要（配置 LLM 调用超时） -->
+        <dependency>
+            <groupId>io.projectreactor.netty</groupId>
+            <artifactId>reactor-netty-http</artifactId>
+        </dependency>
+
         <!-- RAG：本地 ONNX embedding（DeepSeek 无 embedding API）+ pgvector 向量库 + QA Advisor -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
