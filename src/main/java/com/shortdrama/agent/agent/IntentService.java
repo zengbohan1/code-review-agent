@@ -25,6 +25,13 @@ public class IntentService {
             2. 置信度 < 0.6，或当前意图需要订单号/订阅编号/剧集id 但用户未提供时，
                在 clarifyQuestion 字段输出一句需要向用户澄清的提问，其余字段照常输出
             3. 不要输出 JSON 以外的任何内容
+            示例（少样本）：
+            用户："我钱被扣了两次，能退吗" → {"intent":"REFUND","slots":{},"confidence":0.95,"clarifyQuestion":null}
+            用户："订单号 ORD-20260701-0001 帮我退款" → {"intent":"REFUND","slots":{"orderNo":"ORD-20260701-0001"},"confidence":0.98,"clarifyQuestion":null}
+            用户："帮我取消会员订阅" → {"intent":"SUBSCRIPTION","slots":{},"confidence":0.85,"clarifyQuestion":"请提供订阅编号，如 SUB- 开头"}
+            用户："这部剧从第几集开始收费" → {"intent":"SERIES","slots":{},"confidence":0.88,"clarifyQuestion":"请问是哪部剧？"}
+            用户："我要投诉，转人工" → {"intent":"ESCALATE","slots":{},"confidence":0.95,"clarifyQuestion":null}
+            用户："你好" → {"intent":"CHITCHAT","slots":{},"confidence":0.9,"clarifyQuestion":null}
             """;
 
     private final ChatClient chatClient;

@@ -44,6 +44,11 @@
         #send:hover { opacity: .85; }
         #send:disabled { opacity: .5; cursor: not-allowed; }
         .hint { padding: 4px 20px 14px; font-size: 12px; color: #999; }
+        .intent-tag {
+            display: inline-block; margin-bottom: 6px; padding: 2px 10px;
+            background: #eef0ff; color: #4a3f8f; border-radius: 12px;
+            font-size: 12px; font-weight: 500;
+        }
     </style>
 </head>
 <body>
@@ -69,6 +74,11 @@
     const input = document.getElementById('input');
     const sendBtn = document.getElementById('send');
     const costEl = document.getElementById('cost');
+
+    const INTENT_NAMES = {
+        REFUND: '退款', PAYMENT: '支付', SERIES: '剧集',
+        SUBSCRIPTION: '订阅', ESCALATE: '转人工', CHITCHAT: '闲聊', CLARIFY: '澄清'
+    };
 
     function appendMsg(role, text) {
         const div = document.createElement('div');
@@ -119,11 +129,21 @@
                 const { done, value } = await reader.read();
                 if (done) break;
                 buffer += decoder.decode(value, { stream: true });
-                // SSE 解析：按 \n\n 分事件，取 data: 行
+                // SSE 解析：按 \n\n 分事件；event:intent 事件显示意图标签，data 事件追加文本
                 const events = buffer.split('\n\n');
                 buffer = events.pop();
                 for (const ev of events) {
-                    const dataLine = ev.split('\n').find(l => l.startsWith('data:'));
+                    const lines = ev.split('\n');
+                    const eventLine = lines.find(l => l.startsWith('event:'));
+                    const dataLine = lines.find(l => l.startsWith('data:'));
+                    if (eventLine === 'intent' && dataLine) {
+                        const name = INTENT_NAMES[dataLine.slice(5).trim()] || dataLine.slice(5).trim();
+                        const tag = document.createElement('div');
+                        tag.className = 'intent-tag';
+                        tag.textContent = '意图识别：' + name;
+                        bubble.parentNode.insertBefore(tag, bubble);
+                        continue;
+                    }
                     if (dataLine) {
                         full += dataLine.slice(5);
                         bubble.textContent = full;
