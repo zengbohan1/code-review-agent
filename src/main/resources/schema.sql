@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS mock_refund (
     success_at          TIMESTAMP
 );
 
--- 订单流水表：状态流转留痕（面试讲"先落库再请求平台，状态由回调决定"）
+-- 订单流水表：状态流转留痕（先落库再请求平台，状态由回调决定）
 CREATE TABLE IF NOT EXISTS mock_order_flow (
     id          BIGSERIAL PRIMARY KEY,
     order_id    BIGINT      NOT NULL REFERENCES mock_order(id),

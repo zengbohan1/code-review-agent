@@ -146,7 +146,7 @@ public class MockOrderService {
     /**
      * 执行退款。
      *
-     * <p>业务规则（面试深挖点）：
+     * <p>业务规则：
      * <ol>
      *   <li><b>双确认</b>：confirmed + secondaryConfirmed 必须同时为 true，
      *       否则直接拒绝——真实接口文档写明"服务端校验确认参数，避免绕过页面直接调用高风险操作"</li>
@@ -179,10 +179,12 @@ public class MockOrderService {
             throw new IllegalArgumentException(
                     "退款金额超限：本单已退 " + refunded + "，剩余可退 " + order.amount().subtract(refunded));
         }
-        // 规则 4：已用权益
-        if (amount.compareTo(order.amount()) == 0 && !allowUsedEquity) {
+        // 规则 4：累计达到支付金额视为全额退款，涉及已用权益需 allowUsedEquity
+        boolean fullRefund = refunded.add(amount).compareTo(order.amount()) >= 0;
+        if (fullRefund && !allowUsedEquity) {
             throw new IllegalArgumentException("全额退款涉及已使用权益，需 allowUsedEquity=true 确认");
         }
+        // 部分退款后订单保持 PAID（权益未消耗），全额退才置 REFUNDED
         // 落退款单（PENDING）→ mock 平台回调置 SUCCESS
         String refundNo = "RF-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
         jdbc.update("""
@@ -194,8 +196,13 @@ public class MockOrderService {
         writeFlow(orderId, "REFUND", "PAID", "REFUNDING", "退款发起，等待平台回调");
         // mock 平台回调：立即成功（真实系统由支付平台异步回调驱动）
         jdbc.update("UPDATE mock_refund SET status = 'SUCCESS', success_at = now() WHERE refund_no = ?", refundNo);
-        jdbc.update("UPDATE mock_order SET status = 'REFUNDED' WHERE id = ? AND status = 'REFUNDING'", orderId);
-        writeFlow(orderId, "REFUND", "REFUNDING", "REFUNDED", "平台回调确认退款成功");
+        if (fullRefund) {
+            jdbc.update("UPDATE mock_order SET status = 'REFUNDED' WHERE id = ? AND status = 'REFUNDING'", orderId);
+            writeFlow(orderId, "REFUND", "REFUNDING", "REFUNDED", "平台回调确认全额退款成功");
+        } else {
+            jdbc.update("UPDATE mock_order SET status = 'PAID' WHERE id = ? AND status = 'REFUNDING'", orderId);
+            writeFlow(orderId, "REFUND", "REFUNDING", "PAID", "平台回调确认部分退款成功");
+        }
         return "退款成功，退款单号 " + refundNo + "，金额 " + amount + " " + order.currency();
     }
 
