@@ -1,7 +1,22 @@
-# 客服 Agent 自测脚本 v2：三场景完整对话流（含确认轮次）
+# 客服 Agent 自测脚本：三场景 + RAG + 转人工（可重复运行）
+# 用法: pwsh -ExecutionPolicy Bypass -File scripts/test-chat.ps1   （需先启动应用）
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $base = 'http://127.0.0.1:8080/api/chat'
+$envFile = Join-Path $PSScriptRoot '..\.env'
+
+# 重置 mock 数据：清空退款/流水，恢复订单与订阅初始状态（保证脚本可重复执行）
+$psql = Join-Path $env:USERPROFILE 'pgsql\17\bin\psql.exe'
+if ((Test-Path $envFile) -and (Test-Path $psql)) {
+    $dbPwd = (Get-Content $envFile | Where-Object { $_ -match '^DB_PASSWORD=(.+)$' } | ForEach-Object { $matches[1] } | Select-Object -First 1)
+    if ($dbPwd) {
+        $env:PGPASSWORD = $dbPwd
+        & $psql -w -h 127.0.0.1 -p 5432 -U postgres -d shortdrama -c "DELETE FROM mock_refund; DELETE FROM mock_order_flow; UPDATE mock_order SET status='PAID'; UPDATE mock_subscription SET status='ACTIVE', cancelled_at=NULL;" *> $null
+        Write-Host '[init] mock 数据已重置'
+    }
+} else {
+    Write-Host '[warn] 未找到 psql 或 .env，跳过数据重置'
+}
 
 function Send-Chat([string]$msg, [string]$session) {
     $body = @{ message = $msg; sessionId = $session } | ConvertTo-Json -Compress
@@ -28,6 +43,10 @@ Send-Chat '确认取消' 'sess-sub'
 
 Write-Host '=== 场景3: 剧集问题 ==='
 Send-Chat '重生之都市修仙这部剧有多少集，从第几集开始收费？' 'sess-series'
+
+Write-Host '=== 场景4: RAG 策略问答 ==='
+Send-Chat '退款到账一般要多久？' 'sess-rag'
+Send-Chat '自动续费失败怎么办？' 'sess-rag'
 
 Write-Host '=== 附加: 闲聊 ==='
 Send-Chat '你好呀' 'sess-chat'
